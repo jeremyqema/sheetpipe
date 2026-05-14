@@ -1,64 +1,70 @@
-"""Google Sheets data fetcher using the Sheets API v4."""
+"""Fetch data from Google Sheets, with optional local caching."""
 
 from __future__ import annotations
 
-import os
-from typing import Any
+from typing import Optional
 
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+
+from sheetpipe.cache import read_cache, write_cache
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 
 
-def _build_service(credentials_path: str | None = None):
-    """Build and return an authenticated Google Sheets service client."""
-    creds_file = credentials_path or os.environ.get("GOOGLE_APPLICATION_CREDENTIALS")
-    if not creds_file:
-        raise ValueError(
-            "Credentials path must be provided or set via "
-            "GOOGLE_APPLICATION_CREDENTIALS environment variable."
-        )
-    creds = Credentials.from_service_account_file(creds_file, scopes=SCOPES)
-    return build("sheets", "v4", credentials=creds)
+def _build_service(credentials_path: str):
+    creds = service_account.Credentials.from_service_account_file(
+        credentials_path, scopes=SCOPES
+    )
+    return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
 def fetch_sheet_data(
     spreadsheet_id: str,
-    sheet_name: str,
-    credentials_path: str | None = None,
-) -> tuple[list[str], list[list[Any]]]:
-    """Fetch header row and data rows from a Google Sheet.
+    range_name: str,
+    credentials_path: str,
+    use_cache: bool = False,
+    cache_ttl: int = 300,
+    cache_dir: str = ".sheetpipe_cache",
+) -> tuple[list[str], list[list[str]]]:
+    """Return (headers, rows) from a Google Sheet range.
 
-    Returns:
-        A tuple of (headers, rows) where headers is a list of column names
-        and rows is a list of value lists.
+    When *use_cache* is True the result is read from / written to a local
+    JSON cache so repeated runs avoid unnecessary API calls.
     """
-    service = _build_service(credentials_path)
-    range_name = f"{sheet_name}"
-    try:
-        result = (
-            service.spreadsheets()
-            .values()
-            .get(spreadsheetId=spreadsheet_id, range=range_name)
-            .execute()
+    if use_cache:
+        cached = read_cache(
+            spreadsheet_id, range_name, ttl_seconds=cache_ttl, cache_dir=cache_dir
         )
-    except HttpError as exc:
-        raise RuntimeError(
-            f"Failed to fetch sheet '{sheet_name}' from spreadsheet '{spreadsheet_id}': {exc}"
-        ) from exc
+        if cached is not None:
+            if not cached:
+                return [], []
+            headers = cached[0]
+            rows = cached[1:]
+            return headers, rows
 
-    values: list[list[Any]] = result.get("values", [])
-    if not values:
+    service = _build_service(credentials_path)
+    result = (
+        service.spreadsheets()
+        .values()
+        .get(spreadsheetId=spreadsheet_id, range=range_name)
+        .execute()
+    )
+    all_rows: list[list[str]] = result.get("values", [])
+
+    if not all_rows:
+        if use_cache:
+            write_cache(spreadsheet_id, range_name, [], cache_dir=cache_dir)
         return [], []
 
-    headers: list[str] = [str(h) for h in values[0]]
-    rows = values[1:]
+    headers = [str(h) for h in all_rows[0]]
+    num_cols = len(headers)
+    rows: list[list[str]] = []
+    for raw in all_rows[1:]:
+        padded = [str(v) for v in raw] + [""] * (num_cols - len(raw))
+        rows.append(padded[:num_cols])
 
-    # Pad rows that are shorter than the header row
-    padded_rows = [
-        row + [""] * (len(headers) - len(row)) if len(row) < len(headers) else row
-        for row in rows
-    ]
-    return headers, padded_rows
+    if use_cache:
+        write_cache(spreadsheet_id, range_name, [headers] + rows, cache_dir=cache_dir)
+
+    return headers, rows
