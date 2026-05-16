@@ -34,6 +34,28 @@ def _get_cell(row: List[str], headers: List[str], col: str) -> Optional[str]:
         return None
 
 
+def _compute_entry(vals: List[float], functions: List[str]) -> Dict[str, float]:
+    """Compute requested aggregate functions over *vals*.
+
+    Always computes ``count`` regardless of available values; other functions
+    are only computed when at least one numeric value is present.
+    """
+    entry: Dict[str, float] = {}
+    n = len(vals)
+    if "count" in functions:
+        entry["count"] = float(n)
+    if n > 0:
+        if "sum" in functions:
+            entry["sum"] = sum(vals)
+        if "min" in functions:
+            entry["min"] = min(vals)
+        if "max" in functions:
+            entry["max"] = max(vals)
+        if "mean" in functions:
+            entry["mean"] = sum(vals) / n
+    return entry
+
+
 def aggregate_rows(
     headers: List[str],
     rows: List[List[str]],
@@ -63,21 +85,9 @@ def aggregate_rows(
         if val is not None:
             buckets[key].append(val)
 
-    groups: Dict[str, Dict[str, float]] = {}
-    for key, vals in buckets.items():
-        entry: Dict[str, float] = {}
-        n = len(vals)
-        if "count" in config.functions:
-            entry["count"] = float(n)
-        if n > 0:
-            if "sum" in config.functions:
-                entry["sum"] = sum(vals)
-            if "min" in config.functions:
-                entry["min"] = min(vals)
-            if "max" in config.functions:
-                entry["max"] = max(vals)
-            if "mean" in config.functions:
-                entry["mean"] = sum(vals) / n
-        groups[key] = entry
+    groups: Dict[str, Dict[str, float]] = {
+        key: _compute_entry(vals, config.functions)
+        for key, vals in buckets.items()
+    }
 
     return AggregateResult(config=config, groups=groups, warnings=warnings)
